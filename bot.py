@@ -10,6 +10,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from twilio.rest import Client as TwilioClient
 
 from db import upsert_user, get_user, remove_user
 
@@ -27,7 +28,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "number directly to this Telegram chat\\.\n\n"
         "*How it works:*\n"
         "1️⃣  Use /setup to register your Twilio credentials\n"
-        "2️⃣  Configure the webhook URL in your Twilio console\n"
+        "2️⃣  The bot automatically configures your Twilio webhook\n"
         "3️⃣  Receive SMS messages right here in Telegram\\!\n\n"
         "*Commands:*\n"
         "/setup  — Configure your Twilio credentials\n"
@@ -107,30 +108,51 @@ async def receive_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
         return PHONE_NUMBER
 
     chat_id = update.effective_chat.id
-    upsert_user(
-        chat_id,
-        context.user_data["account_sid"],
-        context.user_data["auth_token"],
-        text,
-    )
-    context.user_data.clear()
-
+    account_sid = context.user_data["account_sid"]
+    auth_token = context.user_data["auth_token"]
     webhook_url = f"{public_url}/webhook/{chat_id}"
+
+    # ── Auto-configure Twilio webhook via API ───────────────
+    await update.message.reply_text("⏳ Configuring your Twilio webhook...")
+
+    try:
+        client = TwilioClient(account_sid, auth_token)
+        numbers = client.incoming_phone_numbers.list(phone_number=text)
+
+        if not numbers:
+            await update.message.reply_text(
+                f"❌ Phone number `{text}` was not found in your Twilio account.\n\n"
+                "Make sure you entered the correct Account SID, Auth Token, "
+                "and phone number.\n\nUse /setup to try again.",
+                parse_mode="Markdown",
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        # Update the phone number's SMS webhook URL
+        numbers[0].update(sms_url=webhook_url, sms_method="POST")
+
+    except Exception as e:
+        logger.error("Failed to configure Twilio webhook: %s", e)
+        await update.message.reply_text(
+            "❌ Failed to configure Twilio webhook.\n\n"
+            f"Error: `{_escape_md2(str(e))}`\n\n"
+            "Please check your credentials and try /setup again.",
+            parse_mode="MarkdownV2",
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    # ── Save to database ────────────────────────────────────
+    upsert_user(chat_id, account_sid, auth_token, text)
+    context.user_data.clear()
 
     await update.message.reply_text(
         "🎉 *Setup Complete\\!*\n\n"
-        "Your Twilio credentials have been saved\\.\n\n"
-        "*Now configure your Twilio webhook:*\n"
-        "1\\. Go to the [Twilio Console](https://console\\.twilio\\.com)\n"
-        "2\\. Navigate to *Phone Numbers* → *Manage* → *Active Numbers*\n"
-        f"3\\. Click your number \\(`{_escape_md2(text)}`\\)\n"
-        "4\\. Under *Messaging*, set "A message comes in" to:\n\n"
-        f"`{_escape_md2(webhook_url)}`\n\n"
-        "5\\. Set the method to *HTTP POST*\n"
-        "6\\. Click *Save*\n\n"
-        "✅ You'll now receive SMS messages in this chat\\!",
+        "✅ Twilio credentials saved\n"
+        f"✅ Webhook auto\\-configured on `{_escape_md2(text)}`\n\n"
+        "You will now receive SMS messages directly in this chat\\!",
         parse_mode="MarkdownV2",
-        disable_web_page_preview=True,
     )
     return ConversationHandler.END
 
@@ -163,8 +185,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"*Phone Number:* `{_escape_md2(user['twilio_phone_number'])}`\n"
         "*Auth Token:* `••••••••` \\(hidden\\)\n\n"
         f"*Webhook URL:*\n`{_escape_md2(webhook_url)}`\n\n"
-        "_Set this URL in your Twilio console under_\n"
-        "_Messaging → Phone Number → A MESSAGE COMES IN_",
+        "_Webhook is auto\\-configured on your Twilio number_",
         parse_mode="MarkdownV2",
     )
 
@@ -178,8 +199,20 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("ℹ️ No credentials stored to remove.")
         return
 
+    # Try to clear the webhook from Twilio before deleting
+    try:
+        client = TwilioClient(user["twilio_account_sid"], user["twilio_auth_token"])
+        numbers = client.incoming_phone_numbers.list(
+            phone_number=user["twilio_phone_number"]
+        )
+        if numbers:
+            numbers[0].update(sms_url="", sms_method="POST")
+            logger.info("Cleared Twilio webhook for chat %s", chat_id)
+    except Exception as e:
+        logger.warning("Could not clear Twilio webhook for chat %s: %s", chat_id, e)
+
     remove_user(chat_id)
-    await update.message.reply_text("🗑️ Your Twilio credentials have been deleted.")
+    await update.message.reply_text("🗑️ Your Twilio credentials and webhook have been removed.")
 
 
 # ── Helpers ─────────────────────────────────────────────────
