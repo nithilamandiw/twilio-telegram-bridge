@@ -64,15 +64,27 @@ def confirm_remove_keyboard():
 
 # ── /start ──────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = (
-        "👋 *Welcome to the Twilio SMS Forwarder Bot!*\n\n"
-        "This bot checks your Twilio account for incoming SMS "
-        "and forwards them directly to this chat.\n\n"
-        "*How it works:*\n"
-        "1️⃣  Tap *Setup Twilio* to register your credentials\n"
-        "2️⃣  The bot automatically polls for new messages\n"
-        "3️⃣  New SMS messages appear right here!"
-    )
+    chat_id = update.effective_chat.id
+    user = get_user(chat_id)
+
+    if user:
+        text = (
+            "👋 *Welcome back!*\n\n"
+            f"✅ Active number: `{user['twilio_phone_number']}`\n"
+            f"📡 Monitoring for incoming SMS every {POLL_INTERVAL}s\n\n"
+            "New messages will appear right here in this chat."
+        )
+    else:
+        text = (
+            "👋 *Welcome to the Twilio SMS Forwarder Bot!*\n\n"
+            "This bot checks your Twilio account for incoming SMS "
+            "and forwards them directly to this chat.\n\n"
+            "*How it works:*\n"
+            "1️⃣  Tap *Setup Twilio* to register your credentials\n"
+            "2️⃣  The bot automatically polls for new messages\n"
+            "3️⃣  New SMS messages appear right here!"
+        )
+
     await update.message.reply_text(
         text,
         parse_mode="Markdown",
