@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 ACCOUNT_SID, AUTH_TOKEN, PHONE_NUMBER = range(3)
 
 # Polling interval in seconds
-POLL_INTERVAL = 15
+POLL_INTERVAL = 5
 
 
 # ── /start ──────────────────────────────────────────────────
