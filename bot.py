@@ -299,6 +299,21 @@ def create_bot(token: str) -> Application:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("remove", remove))
 
+    # Register commands in Telegram's menu
+    async def post_init(application: Application) -> None:
+        from telegram import BotCommand
+
+        await application.bot.set_my_commands([
+            BotCommand("start", "Welcome message and usage info"),
+            BotCommand("setup", "Configure Twilio credentials"),
+            BotCommand("status", "View current configuration"),
+            BotCommand("remove", "Delete stored credentials"),
+            BotCommand("cancel", "Abort setup"),
+        ])
+        logger.info("✅ Bot commands registered with Telegram")
+
+    app.post_init = post_init
+
     # Schedule polling job
     app.job_queue.run_repeating(
         poll_twilio_messages,
@@ -307,3 +322,4 @@ def create_bot(token: str) -> Application:
     )
 
     return app
+
