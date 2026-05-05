@@ -315,6 +315,21 @@ def _clear_setup(context: ContextTypes.DEFAULT_TYPE) -> None:
         context.user_data.pop(key, None)
 
 
+def _highlight_otp(text: str) -> str:
+    """
+    Detect OTP/verification codes (4-8 digit sequences) in SMS text
+    and wrap them in monospace backticks for easy tap-to-copy.
+    Avoids wrapping phone numbers (10+ digits or starting with +).
+    """
+    # Match standalone 4-8 digit codes that aren't part of a phone number
+    # Negative lookbehind for + or digit, negative lookahead for digit
+    return re.sub(
+        r'(?<!\+)(?<!\d)\b(\d{4,8})\b(?!\d)',
+        r'`\1`',
+        text,
+    )
+
+
 # ── /setup command (also works without buttons) ────────────
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
@@ -523,11 +538,14 @@ async def poll_twilio_messages(context: ContextTypes.DEFAULT_TYPE) -> None:
                 if msg.direction != "inbound":
                     continue
 
+                # Format body — highlight OTP/verification codes in monospace
+                body = _highlight_otp(msg.body)
+
                 # Forward to Telegram
                 text = (
                     f"📱 *New SMS to* `{msg.to}`\n"
                     f"*From:* `{msg.from_}`\n\n"
-                    f"{msg.body}"
+                    f"{body}"
                 )
 
                 await context.bot.send_message(
