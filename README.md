@@ -58,7 +58,7 @@ python3 main.py
 2. Send `/setup`
 3. Enter your Twilio Account SID
 4. Enter your Twilio Auth Token
-5. Enter your Twilio phone number (e.g. `+13659900989`)
+5. Enter your Twilio phone number (e.g. `+136552729111`)
 6. Done! SMS messages will appear in this chat automatically.
 
 ## Deploy on VPS
