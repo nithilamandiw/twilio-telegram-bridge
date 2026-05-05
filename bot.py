@@ -1,5 +1,6 @@
 import re
 import logging
+from datetime import datetime, timedelta, timezone
 
 from telegram import Update
 from telegram.ext import (
@@ -12,29 +13,39 @@ from telegram.ext import (
 )
 from twilio.rest import Client as TwilioClient
 
-from db import upsert_user, get_user, remove_user
+from db import (
+    upsert_user,
+    get_user,
+    get_all_users,
+    remove_user,
+    is_message_forwarded,
+    mark_message_forwarded,
+)
 
 logger = logging.getLogger(__name__)
 
 # Conversation states for /setup flow
 ACCOUNT_SID, AUTH_TOKEN, PHONE_NUMBER = range(3)
 
+# Polling interval in seconds
+POLL_INTERVAL = 15
+
 
 # ── /start ──────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 *Welcome to the Twilio SMS Forwarder Bot\\!*\n\n"
-        "This bot forwards incoming SMS messages from your Twilio phone "
-        "number directly to this Telegram chat\\.\n\n"
+        "👋 *Welcome to the Twilio SMS Forwarder Bot!*\n\n"
+        "This bot checks your Twilio account for incoming SMS "
+        "and forwards them directly to this chat.\n\n"
         "*How it works:*\n"
         "1️⃣  Use /setup to register your Twilio credentials\n"
-        "2️⃣  The bot automatically configures your Twilio webhook\n"
-        "3️⃣  Receive SMS messages right here in Telegram\\!\n\n"
+        "2️⃣  The bot automatically polls for new messages\n"
+        "3️⃣  New SMS messages appear right here!\n\n"
         "*Commands:*\n"
         "/setup  — Configure your Twilio credentials\n"
         "/status — View your current configuration\n"
         "/remove — Delete your stored credentials",
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
     )
 
 
@@ -42,16 +53,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "🔧 *Twilio Setup*\n\n"
-        "Let's configure your Twilio credentials step by step\\.\n\n"
-        "*Step 1/3:* Please send your Twilio *Account SID*\\.\n"
-        "_\\(Find it at https://console\\.twilio\\.com\\)_\n\n"
-        "Send /cancel to abort setup\\.",
-        parse_mode="MarkdownV2",
+        "Let's configure your Twilio credentials step by step.\n\n"
+        "*Step 1/3:* Please send your Twilio *Account SID*.\n"
+        "_(Find it at https://console.twilio.com)_\n\n"
+        "Send /cancel to abort setup.",
+        parse_mode="Markdown",
     )
     return ACCOUNT_SID
 
 
-async def receive_account_sid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receive_account_sid(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
     text = update.message.text.strip()
 
     if not text.startswith("AC") or len(text) < 30:
@@ -65,15 +78,17 @@ async def receive_account_sid(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     context.user_data["account_sid"] = text
     await update.message.reply_text(
-        "✅ Account SID saved\\.\n\n"
-        "*Step 2/3:* Now send your *Auth Token*\\.\n"
-        "_\\(Find it on the Twilio console dashboard\\)_",
-        parse_mode="MarkdownV2",
+        "✅ Account SID saved.\n\n"
+        "*Step 2/3:* Now send your *Auth Token*.\n"
+        "_(Find it on the Twilio console dashboard)_",
+        parse_mode="Markdown",
     )
     return AUTH_TOKEN
 
 
-async def receive_auth_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receive_auth_token(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
     text = update.message.text.strip()
 
     if len(text) < 20:
@@ -86,17 +101,18 @@ async def receive_auth_token(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data["auth_token"] = text
     await update.message.reply_text(
-        "✅ Auth Token saved\\.\n\n"
-        "*Step 3/3:* Now send your *Twilio phone number* in E\\.164 format\\.\n"
-        "Example: `\\+15551234567`",
-        parse_mode="MarkdownV2",
+        "✅ Auth Token saved.\n\n"
+        "*Step 3/3:* Now send your *Twilio phone number* in E.164 format.\n"
+        "Example: `+15551234567`",
+        parse_mode="Markdown",
     )
     return PHONE_NUMBER
 
 
-async def receive_phone_number(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receive_phone_number(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
     text = update.message.text.strip()
-    public_url = context.bot_data["public_url"]
 
     if not re.match(r"^\+[1-9]\d{6,14}$", text):
         await update.message.reply_text(
@@ -110,13 +126,13 @@ async def receive_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
     chat_id = update.effective_chat.id
     account_sid = context.user_data["account_sid"]
     auth_token = context.user_data["auth_token"]
-    webhook_url = f"{public_url}/webhook/{chat_id}"
 
-    # ── Auto-configure Twilio webhook via API ───────────────
-    await update.message.reply_text("⏳ Configuring your Twilio webhook...")
+    # ── Verify Twilio credentials by making an API call ─────
+    await update.message.reply_text("⏳ Verifying your Twilio credentials...")
 
     try:
         client = TwilioClient(account_sid, auth_token)
+        # Try listing the phone number to verify creds + number ownership
         numbers = client.incoming_phone_numbers.list(phone_number=text)
 
         if not numbers:
@@ -129,16 +145,13 @@ async def receive_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data.clear()
             return ConversationHandler.END
 
-        # Update the phone number's SMS webhook URL
-        numbers[0].update(sms_url=webhook_url, sms_method="POST")
-
     except Exception as e:
-        logger.error("Failed to configure Twilio webhook: %s", e)
+        logger.error("Failed to verify Twilio credentials: %s", e)
         await update.message.reply_text(
-            "❌ Failed to configure Twilio webhook.\n\n"
-            f"Error: `{_escape_md2(str(e))}`\n\n"
+            "❌ Failed to verify Twilio credentials.\n\n"
+            f"Error: `{str(e)}`\n\n"
             "Please check your credentials and try /setup again.",
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -148,11 +161,12 @@ async def receive_phone_number(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data.clear()
 
     await update.message.reply_text(
-        "🎉 *Setup Complete\\!*\n\n"
-        "✅ Twilio credentials saved\n"
-        f"✅ Webhook auto\\-configured on `{_escape_md2(text)}`\n\n"
-        "You will now receive SMS messages directly in this chat\\!",
-        parse_mode="MarkdownV2",
+        "🎉 *Setup Complete!*\n\n"
+        "✅ Twilio credentials verified and saved\n"
+        f"✅ Monitoring `{text}` for incoming SMS\n\n"
+        f"The bot checks for new messages every {POLL_INTERVAL} seconds.\n"
+        "You'll receive them right here in this chat!",
+        parse_mode="Markdown",
     )
     return ConversationHandler.END
 
@@ -167,7 +181,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = get_user(chat_id)
-    public_url = context.bot_data["public_url"]
 
     if not user:
         await update.message.reply_text(
@@ -177,16 +190,14 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     sid = user["twilio_account_sid"]
     masked_sid = sid[:6] + "••••••" + sid[-4:]
-    webhook_url = f"{public_url}/webhook/{chat_id}"
 
     await update.message.reply_text(
         "✅ *Your Configuration*\n\n"
-        f"*Account SID:* `{_escape_md2(masked_sid)}`\n"
-        f"*Phone Number:* `{_escape_md2(user['twilio_phone_number'])}`\n"
-        "*Auth Token:* `••••••••` \\(hidden\\)\n\n"
-        f"*Webhook URL:*\n`{_escape_md2(webhook_url)}`\n\n"
-        "_Webhook is auto\\-configured on your Twilio number_",
-        parse_mode="MarkdownV2",
+        f"*Account SID:* `{masked_sid}`\n"
+        f"*Phone Number:* `{user['twilio_phone_number']}`\n"
+        "*Auth Token:* `••••••••` (hidden)\n\n"
+        f"📡 Polling every {POLL_INTERVAL} seconds for new SMS",
+        parse_mode="Markdown",
     )
 
 
@@ -199,43 +210,86 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("ℹ️ No credentials stored to remove.")
         return
 
-    # Try to clear the webhook from Twilio before deleting
-    try:
-        client = TwilioClient(user["twilio_account_sid"], user["twilio_auth_token"])
-        numbers = client.incoming_phone_numbers.list(
-            phone_number=user["twilio_phone_number"]
-        )
-        if numbers:
-            numbers[0].update(sms_url="", sms_method="POST")
-            logger.info("Cleared Twilio webhook for chat %s", chat_id)
-    except Exception as e:
-        logger.warning("Could not clear Twilio webhook for chat %s: %s", chat_id, e)
-
     remove_user(chat_id)
-    await update.message.reply_text("🗑️ Your Twilio credentials and webhook have been removed.")
+    await update.message.reply_text(
+        "🗑️ Your Twilio credentials have been deleted.\n"
+        "SMS polling has stopped for your number."
+    )
 
 
-# ── Helpers ─────────────────────────────────────────────────
-def _escape_md2(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    special = r"_*[]()~`>#+-=|{}.!\\"
-    return re.sub(f"([{re.escape(special)}])", r"\\\1", text)
+# ── Twilio SMS Polling ──────────────────────────────────────
+async def poll_twilio_messages(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Periodic job: check all registered users' Twilio accounts
+    for new incoming SMS messages and forward them to Telegram.
+    """
+    users = get_all_users()
+
+    for user in users:
+        chat_id = user["telegram_chat_id"]
+        try:
+            client = TwilioClient(
+                user["twilio_account_sid"],
+                user["twilio_auth_token"],
+            )
+
+            # Fetch recent incoming messages to the user's Twilio number
+            messages = client.messages.list(
+                to=user["twilio_phone_number"],
+                date_sent_after=datetime.now(timezone.utc) - timedelta(minutes=5),
+                limit=20,
+            )
+
+            for msg in messages:
+                # Skip if already forwarded
+                if is_message_forwarded(msg.sid):
+                    continue
+
+                # Only forward inbound messages
+                if msg.direction != "inbound":
+                    continue
+
+                # Forward to Telegram
+                text = (
+                    f"📱 *New SMS to* `{msg.to}`\n"
+                    f"*From:* `{msg.from_}`\n\n"
+                    f"{msg.body}"
+                )
+
+                await context.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=text,
+                    parse_mode="Markdown",
+                )
+
+                # Mark as forwarded
+                mark_message_forwarded(msg.sid, chat_id)
+                logger.info(
+                    "Forwarded SMS %s to chat %s: %s → %s",
+                    msg.sid, chat_id, msg.from_, msg.to,
+                )
+
+        except Exception as e:
+            logger.error("Error polling Twilio for chat %s: %s", chat_id, e)
 
 
-def create_bot(token: str, public_url: str) -> Application:
+def create_bot(token: str) -> Application:
     """Build and return a configured python-telegram-bot Application."""
     app = Application.builder().token(token).build()
-
-    # Store public_url so handlers can access it
-    app.bot_data["public_url"] = public_url
 
     # Setup conversation handler
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setup", setup_start)],
         states={
-            ACCOUNT_SID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_sid)],
-            AUTH_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_auth_token)],
-            PHONE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone_number)],
+            ACCOUNT_SID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_sid)
+            ],
+            AUTH_TOKEN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_auth_token)
+            ],
+            PHONE_NUMBER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_phone_number)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -244,5 +298,12 @@ def create_bot(token: str, public_url: str) -> Application:
     app.add_handler(setup_conv)
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("remove", remove))
+
+    # Schedule polling job
+    app.job_queue.run_repeating(
+        poll_twilio_messages,
+        interval=POLL_INTERVAL,
+        first=5,  # start 5 seconds after bot launches
+    )
 
     return app

@@ -1,14 +1,14 @@
 # Twilio SMS → Telegram Forwarder Bot
 
-A Python bot that forwards incoming SMS messages from your Twilio phone number to your Telegram chat in real-time.
+A Python bot that polls your Twilio account for incoming SMS messages and forwards them to your Telegram chat in real-time.
 
 ## Features
 
-- 🔐 Per-user Twilio credential storage
-- ✅ Twilio webhook signature validation
-- 💬 Guided setup via Telegram chat commands (ConversationHandler)
-- 🗃️ SQLite database (zero external DB dependencies)
-- ⚡ Flask webhook server + python-telegram-bot in one process
+- 🔐 Per-user Twilio credential storage (Account SID + Auth Token)
+- 📡 Automatic polling — checks Twilio every 15 seconds for new SMS
+- ✅ Credential verification on setup
+- 🗃️ SQLite database (no external DB needed)
+- 🚫 No webhooks, no domain, no port forwarding required
 
 ## Prerequisites
 
@@ -22,67 +22,91 @@ A Python bot that forwards incoming SMS messages from your Twilio phone number t
 
 1. Open Telegram and search for **@BotFather**
 2. Send `/newbot` and follow the prompts
-3. Copy the bot token (looks like `123456789:ABCdefGHIjklMNO-pqrSTUvwxYZ`)
+3. Copy the bot token
 
 ### 2. Clone & Install
 
 ```bash
-git clone <your-repo-url>
-cd twilio-telegram
-python -m venv venv
-source venv/bin/activate   # On Windows: venv\Scripts\activate
+git clone https://github.com/nithilamandiw/twilio-telegram-bridge.git
+cd twilio-telegram-bridge
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configure Environment
+### 3. Configure
 
 ```bash
 cp .env.example .env
+nano .env
 ```
 
-Edit `.env` with your values:
-
+Set your bot token:
 ```env
 BOT_TOKEN=123456789:ABCdefGHIjklMNO-pqrSTUvwxYZ
-PUBLIC_URL=https://yourserver.com
-PORT=3000
 ```
 
-### 4. Run the Server
+### 4. Run
 
 ```bash
-python main.py
+python3 main.py
 ```
 
-### 5. Expose Locally with ngrok (for testing)
+### 5. Set Up in Telegram
 
-If you're running locally, use [ngrok](https://ngrok.com/) to create a public URL:
+1. Open your bot in Telegram
+2. Send `/setup`
+3. Enter your Twilio Account SID
+4. Enter your Twilio Auth Token
+5. Enter your Twilio phone number (e.g. `+13659900989`)
+6. Done! SMS messages will appear in this chat automatically.
+
+## Deploy on VPS
 
 ```bash
-ngrok http 3000
+# SSH into your VPS
+ssh ubuntu@YOUR_VPS_IP
+
+# Clone and install
+cd ~
+git clone https://github.com/nithilamandiw/twilio-telegram-bridge.git
+cd twilio-telegram-bridge
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Configure
+cp .env.example .env
+nano .env   # paste your BOT_TOKEN
+
+# Create systemd service
+sudo nano /etc/systemd/system/twilio-telegram.service
 ```
 
-Copy the `https://` forwarding URL and set it as `PUBLIC_URL` in your `.env`:
+Paste this service config:
+```ini
+[Unit]
+Description=Twilio Telegram Bot
+After=network.target
 
-```env
-PUBLIC_URL=https://abc123.ngrok-free.app
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/twilio-telegram-bridge
+ExecStart=/home/ubuntu/twilio-telegram-bridge/venv/bin/python3 main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-> **Note:** Restart the bot after changing `PUBLIC_URL`.
-
-### 6. Configure Your Twilio Webhook
-
-After running `/setup` in the bot, you'll receive a webhook URL. To configure it in Twilio:
-
-1. Go to the [Twilio Console](https://console.twilio.com)
-2. Navigate to **Phone Numbers** → **Manage** → **Active Numbers**
-3. Click your phone number
-4. Under **Messaging** → **"A message comes in"**, enter:
-   ```
-   https://YOUR_PUBLIC_URL/webhook/YOUR_CHAT_ID
-   ```
-5. Set the method to **HTTP POST**
-6. Click **Save**
+Start the service:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable twilio-telegram
+sudo systemctl start twilio-telegram
+sudo systemctl status twilio-telegram
+```
 
 ## Bot Commands
 
@@ -97,33 +121,18 @@ After running `/setup` in the bot, you'll receive a webhook URL. To configure it
 ## How It Works
 
 ```
-SMS Sender → Twilio → POST /webhook/:chatId → Validate Signature → Telegram Message
+Twilio Account ←── Bot polls every 15s ──→ New SMS? ──→ Forward to Telegram
 ```
 
-1. Someone sends an SMS to your Twilio number
-2. Twilio forwards the SMS to your webhook URL
-3. The server validates the Twilio request signature
-4. The SMS content is forwarded to your Telegram chat
-
-## Message Format
-
-When an SMS arrives, you'll see:
-
-```
-📱 New SMS to +15551234567
-From: +14449876543
-
-Hello, this is the SMS body text!
-```
+The bot uses the Twilio REST API to check for incoming messages. No webhooks, no web server, no domain needed.
 
 ## Project Structure
 
 ```
-twilio-telegram/
-├── main.py           # Entry point — starts Flask + bot
-├── bot.py            # Telegram bot commands & setup flow
-├── server.py         # Flask webhook endpoint
-├── db.py             # SQLite setup and queries
+twilio-telegram-bridge/
+├── main.py           # Entry point
+├── bot.py            # Telegram bot commands & Twilio polling
+├── db.py             # SQLite database
 ├── requirements.txt  # Python dependencies
 ├── .env.example      # Environment variable template
 ├── .gitignore
@@ -132,9 +141,9 @@ twilio-telegram/
 
 ## Security
 
-- **Webhook validation:** Every incoming Twilio request is validated using `twilio.RequestValidator` to prevent spoofed messages
-- **Auth tokens are hidden:** The `/status` command masks sensitive credentials
-- **Parameterized queries:** All database operations use parameterized queries to prevent SQL injection
+- **Credentials verified:** Twilio creds are validated via API before saving
+- **Auth tokens hidden:** `/status` masks sensitive credentials
+- **Parameterized queries:** All DB operations use parameterized queries
 - **No token logging:** Auth tokens are never written to logs
 
 ## License

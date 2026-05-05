@@ -17,7 +17,7 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create the users table if it doesn't exist."""
+    """Create tables if they don't exist."""
     conn = _get_conn()
     conn.execute(
         """
@@ -26,6 +26,16 @@ def init_db() -> None:
             twilio_account_sid TEXT,
             twilio_auth_token TEXT,
             twilio_phone_number TEXT
+        )
+        """
+    )
+    # Track which SMS messages have already been forwarded
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS forwarded_messages (
+            message_sid TEXT PRIMARY KEY,
+            telegram_chat_id TEXT,
+            forwarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
@@ -66,21 +76,43 @@ def get_user(chat_id: int | str) -> dict | None:
     return dict(row) if row else None
 
 
-def get_user_by_phone(phone_number: str) -> dict | None:
-    """Get a user by their Twilio phone number."""
+def get_all_users() -> list[dict]:
+    """Get all registered users."""
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM users WHERE twilio_phone_number = ?", (phone_number,)
-    ).fetchone()
+    rows = conn.execute("SELECT * FROM users").fetchall()
     conn.close()
-    return dict(row) if row else None
+    return [dict(row) for row in rows]
 
 
 def remove_user(chat_id: int | str) -> None:
-    """Delete a user's stored credentials."""
+    """Delete a user's stored credentials and forwarded message history."""
     conn = _get_conn()
     conn.execute(
+        "DELETE FROM forwarded_messages WHERE telegram_chat_id = ?", (str(chat_id),)
+    )
+    conn.execute(
         "DELETE FROM users WHERE telegram_chat_id = ?", (str(chat_id),)
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_message_forwarded(message_sid: str) -> bool:
+    """Check if a message has already been forwarded."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT 1 FROM forwarded_messages WHERE message_sid = ?", (message_sid,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def mark_message_forwarded(message_sid: str, chat_id: int | str) -> None:
+    """Mark a message as forwarded."""
+    conn = _get_conn()
+    conn.execute(
+        "INSERT OR IGNORE INTO forwarded_messages (message_sid, telegram_chat_id) VALUES (?, ?)",
+        (message_sid, str(chat_id)),
     )
     conn.commit()
     conn.close()
