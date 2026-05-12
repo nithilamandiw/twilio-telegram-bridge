@@ -124,20 +124,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]),
         )
 
-    elif data == "start_setup":
-        # Trigger the setup conversation
-        await query.edit_message_text(
-            "🔧 *Twilio Setup*\n\n"
-            "Let's configure your Twilio credentials step by step.\n\n"
-            "*Step 1/3:* Please send your Twilio *Account SID*.\n"
-            "_(Find it at https://console.twilio.com)_\n\n"
-            "Send /cancel to abort setup.",
-            parse_mode="Markdown",
-        )
-        # Set conversation state manually
-        context.user_data["_setup_active"] = True
-        context.user_data["_setup_step"] = "account_sid"
-
     elif data == "status":
         chat_id = update.effective_chat.id
         user = get_user(chat_id)
@@ -220,113 +206,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-# ── Text handler for button-triggered setup ─────────────────
-async def button_setup_text_handler(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Handle text messages during button-triggered setup flow."""
-    if not context.user_data.get("_setup_active"):
-        return
-
-    step = context.user_data.get("_setup_step")
-    text = update.message.text.strip()
-
-    if step == "account_sid":
-        if not text.startswith("AC") or len(text) < 30:
-            await update.message.reply_text(
-                "⚠️ That doesn't look like a valid Account SID.\n"
-                "It should start with `AC` and be 34 characters long.\n\n"
-                "Please try again or /cancel.",
-                parse_mode="Markdown",
-            )
-            return
-        context.user_data["account_sid"] = text
-        context.user_data["_setup_step"] = "auth_token"
-        await update.message.reply_text(
-            "✅ Account SID saved.\n\n"
-            "*Step 2/3:* Now send your *Auth Token*.\n"
-            "_(Find it on the Twilio console dashboard)_",
-            parse_mode="Markdown",
-        )
-
-    elif step == "auth_token":
-        if len(text) < 20:
-            await update.message.reply_text(
-                "⚠️ That doesn't look like a valid Auth Token.\n"
-                "It should be 32 characters long.\n\n"
-                "Please try again or /cancel.",
-            )
-            return
-        context.user_data["auth_token"] = text
-        context.user_data["_setup_step"] = "phone_number"
-        await update.message.reply_text(
-            "✅ Auth Token saved.\n\n"
-            "*Step 3/3:* Now send your *Twilio phone number* in E.164 format.\n"
-            "Example: `+15551234567`",
-            parse_mode="Markdown",
-        )
-
-    elif step == "phone_number":
-        if not re.match(r"^\+[1-9]\d{6,14}$", text):
-            await update.message.reply_text(
-                "⚠️ Invalid phone number format.\n"
-                "Please use E.164 format, e.g. `+15551234567`.\n\n"
-                "Try again or /cancel.",
-                parse_mode="Markdown",
-            )
-            return
-
-        chat_id = update.effective_chat.id
-        account_sid = context.user_data["account_sid"]
-        auth_token = context.user_data["auth_token"]
-
-        await update.message.reply_text("⏳ Verifying your Twilio credentials...")
-
-        try:
-            client = TwilioClient(account_sid, auth_token)
-            numbers = client.incoming_phone_numbers.list(phone_number=text)
-            if not numbers:
-                await update.message.reply_text(
-                    f"❌ Phone number `{text}` was not found in your Twilio account.\n\n"
-                    "Make sure you entered the correct credentials.\n"
-                    "Use /setup to try again.",
-                    parse_mode="Markdown",
-                    reply_markup=back_keyboard(),
-                )
-                _clear_setup(context)
-                return
-        except Exception as e:
-            logger.error("Failed to verify Twilio credentials: %s", e)
-            await update.message.reply_text(
-                "❌ Failed to verify Twilio credentials.\n\n"
-                f"Error: `{str(e)}`\n\n"
-                "Please check your credentials and try /setup again.",
-                parse_mode="Markdown",
-                reply_markup=back_keyboard(),
-            )
-            _clear_setup(context)
-            return
-
-        upsert_user(chat_id, account_sid, auth_token, text)
-        _clear_setup(context)
-
-        await update.message.reply_text(
-            "🎉 *Setup Complete!*\n\n"
-            "✅ Twilio credentials verified and saved\n"
-            f"✅ Monitoring `{text}` for incoming SMS\n\n"
-            f"The bot checks for new messages every {POLL_INTERVAL} seconds.\n"
-            "You'll receive them right here in this chat!",
-            parse_mode="Markdown",
-            reply_markup=main_menu_keyboard(),
-        )
-
-
-def _clear_setup(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Clear setup state from user_data."""
-    for key in ["_setup_active", "_setup_step", "account_sid", "auth_token"]:
-        context.user_data.pop(key, None)
-
-
 def _highlight_otp(text: str) -> str:
     """
     Detect OTP/verification codes (4-8 digit sequences) in SMS text
@@ -342,7 +221,24 @@ def _highlight_otp(text: str) -> str:
     )
 
 
-# ── /setup command (also works without buttons) ────────────
+# ── /setup command ──────────────────────────────────────────
+async def setup_start_button(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """Entry point for setup via inline button press."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🔧 *Twilio Setup*\n\n"
+        "Let's configure your Twilio credentials step by step.\n\n"
+        "*Step 1/3:* Please send your Twilio *Account SID*.\n"
+        "_(Find it at https://console.twilio.com)_\n\n"
+        "Send /cancel to abort setup.",
+        parse_mode="Markdown",
+    )
+    return ACCOUNT_SID
+
+
 async def setup_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "🔧 *Twilio Setup*\n\n"
@@ -583,7 +479,10 @@ def create_bot(token: str) -> Application:
 
     # Setup conversation handler (for /setup command)
     setup_conv = ConversationHandler(
-        entry_points=[CommandHandler("setup", setup_start)],
+        entry_points=[
+            CommandHandler("setup", setup_start),
+            CallbackQueryHandler(setup_start_button, pattern="^start_setup$"),
+        ],
         states={
             ACCOUNT_SID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, receive_account_sid)
@@ -606,11 +505,6 @@ def create_bot(token: str) -> Application:
 
     # Button callback handler
     app.add_handler(CallbackQueryHandler(button_handler))
-
-    # Text handler for button-triggered setup
-    app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, button_setup_text_handler)
-    )
 
     # Register commands in Telegram's menu
     async def post_init(application: Application) -> None:
