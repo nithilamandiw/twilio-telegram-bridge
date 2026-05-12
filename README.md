@@ -146,6 +146,11 @@ twilio-telegram-bridge/
 - **Parameterized queries:** All DB operations use parameterized queries
 - **No token logging:** Auth tokens are never written to logs
 
-## License
+## 🧑‍💻 Author
 
-MIT
+Nithila Mandiw
+
+
+## 💡 Contributing
+
+Feel free to fork and improve the project!
